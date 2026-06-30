@@ -1,6 +1,6 @@
 # О проекте
 
-mini_nginx это  асинхронный HTTP reverse proxy на `asyncio`. Учебный проект:
+mini_nginx это асинхронный HTTP reverse proxy на `asyncio`. Учебный проект:
 принимает клиентские соединения, парсит HTTP-запрос, проксирует его на один из
 апстримов по схеме round-robin и возвращает ответ клиенту.
 
@@ -26,15 +26,19 @@ poetry install
 
 ### 1. Поднять апстримы (echo-серверы на FastAPI)
 
-В отдельных терминалах или в фоне — три апстрима на портах 9001–9003:
+В отдельных терминалах или в фоне — три апстрима на портах 9001–9003.
+Переменная `UPSTREAM_NAME` задаёт имя апстрима: оно возвращается в каждом
+ответе (поле `upstream`) и позволяет видеть, какой бэкенд обслужил запрос —
+это нужно для проверки round-robin под нагрузкой.
 
 ```bash
-poetry run uvicorn mini_nginx.echo_app:app --host 127.0.0.1 --port 9001 --workers 1 &
-poetry run uvicorn mini_nginx.echo_app:app --host 127.0.0.1 --port 9002 --workers 1 &
-poetry run uvicorn mini_nginx.echo_app:app --host 127.0.0.1 --port 9003 --workers 1 &
+UPSTREAM_NAME=up-9001 poetry run uvicorn mini_nginx.echo_app:app --host 127.0.0.1 --port 9001 --workers 1 &
+UPSTREAM_NAME=up-9002 poetry run uvicorn mini_nginx.echo_app:app --host 127.0.0.1 --port 9002 --workers 1 &
+UPSTREAM_NAME=up-9003 poetry run uvicorn mini_nginx.echo_app:app --host 127.0.0.1 --port 9003 --workers 1 &
 ```
 
-Данные апстримы содержатся в константе UPSTREAMS в файле server.py
+Список апстримов, на которые проксирует сервер, задан в константе `UPSTREAMS`
+в файле `server.py`.
 
 Остановить все апстримы:
 
@@ -57,6 +61,14 @@ curl -v http://127.0.0.1:8888/
 curl -v -X POST http://127.0.0.1:8888/echo -d 'hello world'
 ```
 
+Несколько запросов подряд — видно, как round-robin перебирает апстримы:
+
+```bash
+for i in 1 2 3 4; do curl -s http://127.0.0.1:8888/ ; echo ; done
+```
+
+В ответах чередуются `up-9001 → up-9002 → up-9003 → up-9001`.
+
 ## Конфигурация
 
 Параметры заданы константами в `server.py`:
@@ -70,3 +82,42 @@ curl -v -X POST http://127.0.0.1:8888/echo -d 'hello world'
 | `MAX_CLIENTS` | лимит клиентских соединений |
 | `MAX_UPSTREAM` | лимит коннектов к апстриму |
 | `UPSTREAMS` | список апстримов для round-robin |
+
+## Нагрузочное тестирование (k6)
+
+Нагрузочный тест прогоняется через [k6](https://grafana.com/docs/k6/latest/set-up/install-k6/).
+Сценарий `load_test.js` шлёт `GET /` и `POST /echo`, проверяет статусы и
+собирает распределение ответов по апстримам.
+
+Установка k6 (macOS):
+
+```bash
+brew install k6
+```
+
+Запуск (апстримы и прокси должны быть подняты):
+
+```bash
+k6 run load_test.js
+```
+
+Сценарий: 20 виртуальных пользователей в течение 30 секунд. Пороги:
+p95 latency < 500ms, p99 < 1000ms, доля ошибок < 1%.
+
+### Результаты прогона
+
+| Метрика | Значение |
+|---------|----------|
+| RPS | ~22 600 req/s |
+| latency p95 | 1.31 ms |
+| latency p99 | 1.62 ms |
+| ошибки (`http_req_failed`) | 0.00% |
+| timeouts | 0 |
+
+Распределение по апстримам (round-robin) — нагрузка раскидана равномерно:
+
+| Апстрим | Запросов |
+|---------|----------|
+| up-9001 | 234 896 |
+| up-9002 | 233 418 |
+| up-9003 | 210 282 |
