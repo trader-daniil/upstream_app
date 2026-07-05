@@ -2,7 +2,7 @@ import asyncio
 import logging
 from dataclasses import dataclass
 from itertools import cycle
-
+from mini_nginx.upstream_pool import UpstreamPool
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 log = logging.getLogger("mini_nginx")
 
@@ -17,16 +17,11 @@ MAX_CLIENTS = 100 # сколько клиентских соединений о�
 MAX_UPSTREAM = 50 # сколько соединений к апстримам держим одновременно
 
 client_sem = asyncio.Semaphore(MAX_CLIENTS) # лимит на клиентские соединения
-upstream_sem = asyncio.Semaphore(MAX_UPSTREAM) # лимит на соединения к upstream
 
-
-# Список upstream для реализации Round Robin
-UPSTREAMS = [
-    ("127.0.0.1", 9001),
-    ("127.0.0.1", 9002),
-    ("127.0.0.1", 9003),
-]
-upstream_pool = cycle(UPSTREAMS) # round-robin: next() отдаёт следующий по кругу
+pool = UpstreamPool(
+    upstreams=[("127.0.0.1", 9001), ("127.0.0.1", 9002), ("127.0.0.1", 9003)],
+    max_connections=MAX_UPSTREAM,
+)
 
 
 @dataclass
@@ -85,7 +80,7 @@ async def forward_request(client_reader, upstream_writer) -> None:
 
 async def forward_response(upstream_reader, client_writer) -> None:
     """
-    Пересылаем ответ upstream обратно клиенту.
+    Пересылаем ответ upstream обратно клиенту
     Перед отправкой подсматриваем статус ответа и логируем его.
     """
     buffer = bytearray()
@@ -117,10 +112,10 @@ async def handle(client_reader, client_writer) -> None:
     async with client_sem: # Задаем лимит клиентских подключений
 
         # Получаем следующий upstream(round robin)
-        host, port = next(upstream_pool)
+        host, port = pool.next_upstream()
         log.info("Пересылка на upstream %s:%s", host, port)
 
-        async with upstream_sem: # Лимит подключений к апстриму
+        async with pool.limit(): # Лимит подключений к апстриму
             try:
                 upstream_reader, upstream_writer = await asyncio.wait_for(
                     asyncio.open_connection(host, port),
