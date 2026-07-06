@@ -1,58 +1,21 @@
 import asyncio
 import logging
-from dataclasses import dataclass
-from itertools import cycle
 from mini_nginx.upstream_pool import UpstreamPool
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
+from mini_nginx.utils.http_parser import parse_request_head
+from mini_nginx.config_loader import load_config
+
+
+cfg = load_config("config.yaml") # Загружаем настройки из файла конфигурации
+
+client_sem = asyncio.Semaphore(cfg.max_clients) # лимит на клиентские соединения
+
+logging.basicConfig(level=cfg.log_level.upper(), format="%(asctime)s %(message)s")
 log = logging.getLogger("mini_nginx")
 
-# Констануты таймаутов в wait_for
-CONNECT_TIMEOUT = 5.0 # на установку соединения с upstream
-READ_TIMEOUT = 30.0 # на каждый отдельный read
-WRITE_TIMEOUT = 30.0 # на каждый drain
-TOTAL_TIMEOUT = 60.0 # на весь запрос целиком с пересылкой к upstream и обратно клиенту
-
-# Константы для ограничения соединений
-MAX_CLIENTS = 100 # сколько клиентских соединений обслуживаем одновременно
-MAX_UPSTREAM = 50 # сколько соединений к апстримам держим одновременно
-
-client_sem = asyncio.Semaphore(MAX_CLIENTS) # лимит на клиентские соединения
-
 pool = UpstreamPool(
-    upstreams=[("127.0.0.1", 9001), ("127.0.0.1", 9002), ("127.0.0.1", 9003)],
-    max_connections=MAX_UPSTREAM,
+    upstreams=cfg.upstreams,
+    max_connections=cfg.max_upstream,
 )
-
-
-@dataclass
-class RequestHead:
-    method: str
-    path: str
-    version: str
-    headers: list[tuple[str, str]]
-
-
-def parse_request_head(data: bytes) -> RequestHead:
-    """
-    Парсит голову из  прочитанных байтов
-    Ничего не вынимает из потока — только смотрит и раскладывает по полям.
-    """
-    head_bytes = data.split(b"\r\n\r\n", 1)[0]
-    start_line, *header_lines = head_bytes.split(b"\r\n")
-
-    method, path, version = start_line.split(b" ", 2)
-
-    headers: list[tuple[str, str]] = []
-    for line in header_lines:
-        name, _, value = line.partition(b":")
-        headers.append((name.strip().decode(), value.strip().decode()))
-
-    return RequestHead(
-        method=method.decode(),
-        path=path.decode(),
-        version=version.decode(),
-        headers=headers,
-    )
 
 
 async def forward_request(client_reader, upstream_writer) -> None:
@@ -63,7 +26,7 @@ async def forward_request(client_reader, upstream_writer) -> None:
     buffer = bytearray()
     logged = False
     while True:
-        data = await asyncio.wait_for(client_reader.read(4096), READ_TIMEOUT)
+        data = await asyncio.wait_for(client_reader.read(4096), cfg.read_timeout)
         if not data:
             break
 
@@ -75,7 +38,7 @@ async def forward_request(client_reader, upstream_writer) -> None:
                 logged = True
 
         upstream_writer.write(data)
-        await asyncio.wait_for(upstream_writer.drain(), WRITE_TIMEOUT)
+        await asyncio.wait_for(upstream_writer.drain(), cfg.write_timeout)
 
 
 async def forward_response(upstream_reader, client_writer) -> None:
@@ -86,7 +49,7 @@ async def forward_response(upstream_reader, client_writer) -> None:
     buffer = bytearray()
     logged = False
     while True:
-        data = await asyncio.wait_for(upstream_reader.read(4096), READ_TIMEOUT)
+        data = await asyncio.wait_for(upstream_reader.read(4096), cfg.read_timeout)
         if not data:
             break
 
@@ -102,7 +65,7 @@ async def forward_response(upstream_reader, client_writer) -> None:
                 logged = True
 
         client_writer.write(data)
-        await asyncio.wait_for(client_writer.drain(), WRITE_TIMEOUT)
+        await asyncio.wait_for(client_writer.drain(), cfg.write_timeout)
 
 
 async def handle(client_reader, client_writer) -> None:
@@ -119,7 +82,7 @@ async def handle(client_reader, client_writer) -> None:
             try:
                 upstream_reader, upstream_writer = await asyncio.wait_for(
                     asyncio.open_connection(host, port),
-                    CONNECT_TIMEOUT,
+                    cfg.connect_timeout,
                 )
             except TimeoutError:
                 log.warning("upstream connect timeout")
@@ -132,7 +95,7 @@ async def handle(client_reader, client_writer) -> None:
                         forward_request(client_reader, upstream_writer),
                         forward_response(upstream_reader, client_writer),
                     ),
-                    TOTAL_TIMEOUT,
+                    cfg.total_timeout,
                 )
             except TimeoutError:
                 log.warning("proxy total timeout")
@@ -142,7 +105,7 @@ async def handle(client_reader, client_writer) -> None:
 
 
 async def main() -> None:
-    server = await asyncio.start_server(handle, "127.0.0.1", 8888)
+    server = await asyncio.start_server(handle, cfg.host, cfg.port)
     async with server:
         await server.serve_forever()
 

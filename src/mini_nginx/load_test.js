@@ -2,10 +2,10 @@ import http from 'k6/http';
 import { check } from 'k6';
 import { Counter } from 'k6/metrics';
 
-// ── фиксированная нагрузка: 20 VU в течение 30 секунд ──
+// ── нагрузка: 1000 VU в течение 75 секунд ──
 export const options = {
-  vus: 20,
-  duration: '30s',
+  vus: 1000,
+  duration: '75s',
   thresholds: {
     http_req_duration: ['p(95)<500', 'p(99)<1000'],
     http_req_failed: ['rate<0.01'],
@@ -19,7 +19,7 @@ const upstreamHits = {
   'up-9003': new Counter('hits_up_9003'),
 };
 
-const BASE = 'http://127.0.0.1:8888';
+const BASE = 'http://127.0.0.1:8080';
 
 export default function () {
   // — GET / —
